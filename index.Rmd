@@ -1,0 +1,163 @@
+---
+title: "Practical Machine Learning Project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+The purpose of this project is to use sensor data from six participants to predict whether the subjects were correctly performing barbell lifts. The data consists of readings from accelerometers attached to the subjects' belts, forearms and arms and the dumbbell itself.
+
+## Download the data
+
+Here we download the training and test data and set up the dataframe to perform exploratory data analysis and modelling.
+```{r warning=FALSE}
+library(dplyr)
+library(ggplot2)
+
+
+# download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', destfile = 'pml-training.csv')
+# 
+# download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv', destfile = 'pml-testing.csv')
+
+training <- read.csv('pml-training.csv', stringsAsFactors = TRUE)
+testing <- read.csv('pml-testing.csv', stringsAsFactors = TRUE)
+
+## There are a lot of columns with NAs
+## We will eliminate those columns 
+null_cols <- apply(is.na(training), 2, sum)
+null_cols <-names(which(null_cols!=0, useNames = TRUE))
+
+## Additionally many column consist primarily of blank values 
+## We will eliminate those as well
+blank_cols <- apply(training=='', 2, sum)
+blank_cols <-names(which(blank_cols!=0, useNames = TRUE))
+
+# Other uninteresting columns, for example X is just an id.
+other_cols <- c('X','user_name')
+time_cols <- names(training)[grepl('timestamp',names(training))]
+cols_to_omit <- c(other_cols, null_cols, blank_cols, time_cols)
+cols_to_omit <- unique(cols_to_omit)
+
+cols_to_retain <- names(training)[!(names(training) %in% cols_to_omit)]
+
+training <- training[,cols_to_retain] 
+
+# exclude the classe column for the testing set 
+cols_to_retain <- cols_to_retain[!(cols_to_retain =='classe')]
+testing <- testing[,cols_to_retain]
+  
+```
+## Exploratory Data Analysis
+
+Among the remaining variables we will look for any correlations or other patterns tha might help guide our feature selection an modeling process.
+
+Are any of the remaining numeric columns composed of only a single value? If so, we can probably omit those.
+```{r warning=FALSE}
+
+numeric_cols <- names(training)[sapply(training, class) %in% c('integer','numeric')]
+## 54 numeric columns 
+
+training_numeric <- training[,numeric_cols]
+
+library(tidyr)
+
+training_numeric_gathered <- training_numeric %>% gather()
+
+### not printing plot to reduce file size
+ggplot(training_numeric_gathered, aes(value)) +
+  geom_histogram(fill='red') + facet_wrap(~key, scales = 'free_x')
+
+rm(training_numeric_gathered)
+
+```
+Look at correlation between the remaining variables. We could eliminate any perfectly correlated variables here.
+
+```{r warning=FALSE}
+
+library(corrplot)
+mat <- cor(training[,-c(1,55)])
+corrplot(mat, type = 'lower', method = 'square', tl.cex = 0.6)
+
+```
+Only a handful of variables show a high degree of correlation.
+
+Lets group each of the variables by class to detect any patterns of interest.
+```{r warning=FALSE, message=FALSE, warning=FALSE}
+
+training_grouped <- training %>%
+  group_by(classe) %>%
+  summarise(across(
+    .cols = is.numeric, 
+    .fns = list(Mean = mean), na.rm = TRUE, 
+    .names = "{col}"
+    )) 
+
+
+library(reshape2)
+training_grouped <- melt(training_grouped, id.vars = 'classe')
+
+ggplot(training_grouped, aes(classe, value)) + geom_bar(stat='identity', fill = 'purple') +
+  facet_wrap(.~variable, scales = 'free_y') + ggtitle('Means of Each Measure By Class') +
+  theme(strip.text.x = element_text(size = 7))
+
+```
+## Modeling 
+
+Subdivide our training data set into a training and testing (validation) data sets.
+```{r}
+
+library(caret)
+
+# subdivide training into a training and test set 
+inTrain <- createDataPartition(training$classe, p = 0.7, list = FALSE)
+
+training.train <- training[inTrain,]
+training.test <- training[-inTrain,]
+
+```
+First we will start with a random forest model using all the available variables.
+```{r}
+
+set.seed(14197)
+mod_rf <- train(classe ~ ., data=training.train, method = 'rf', trControl=trainControl(method='none'),
+                tuneGrid=data.frame(mtry=7))
+      
+```
+Using the final model parameters we can then assess model accuracy on the validation set.
+```{r}
+
+pred_rf <- predict(mod_rf, training.test)
+confusionMatrix(pred_rf, training.test$classe)
+
+```
+Accuracy for the random forest model is 99.75%.
+
+As a second approach we will try to model using a classification tree
+```{r}
+mod_tree <- train(classe ~ ., method="rpart", data=training.train)
+
+pred_tree <- predict(mod_tree, training.test)
+confusionMatrix(pred_tree, training.test$classe)
+```
+Using a classification tree yields 52.25% prediction accuracy, far below the accuracy of the random forest.
+
+As a final modeling approach, we will try generalized boosted model.
+```{r}
+mod_gbm <- train(classe ~ ., method='gbm', data=training.train, verbose=FALSE,
+                 trControl=trainControl(method="cv", number=2, allowParallel=TRUE))
+
+pred_gbm <- predict(mod_gbm, training.test)
+confusionMatrix(pred_gbm, training.test$classe)
+```
+## Conclusion 
+
+The accuracy of the generalized boosted model was 98.83%.  As it is clear that the prediction accuracy of the random forest model is highest, we will use that to predict the classes of the final test set.
+```{r}
+pred_final <- predict(mod_rf, testing)
+
+pred_final
+```
